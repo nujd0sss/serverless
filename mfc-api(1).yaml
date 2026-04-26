@@ -1,0 +1,703 @@
+openapi: 3.0.0
+info:
+  title: MFC Online - Государственные услуги
+  description: |
+    Платформа электронной записи на госуслуги с защитой персональных данных.
+    Включает намеренные уязвимости для тестирования WAF+Serverless.
+  version: 1.0.0
+  contact:
+    name: Security Research Team
+    email: security@mfc-online.ru
+
+servers:
+  - url: https://{api-gw-id}.apigw.yandexcloud.net
+    description: Production API Gateway
+  - url: http://localhost:8080
+    description: Local development
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT токен, полученный при аутентификации
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API ключ для сервисных аккаунтов
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        code:
+          type: integer
+          example: 400
+        message:
+          type: string
+          example: "Validation error"
+        requestId:
+          type: string
+          example: "505b307a-9ed3-4503-be72-8975ed9d2f2b"
+        timestamp:
+          type: string
+          format: date-time
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        fullName:
+          type: string
+          example: "Иванов Иван Иванович"
+        snils:
+          type: string
+          pattern: '^\d{11}$'
+          description: "СНИЛС - 11 цифр"
+        passportSeries:
+          type: string
+          pattern: '^\d{4}$'
+        passportNumber:
+          type: string
+          pattern: '^\d{6}$'
+        passportIssuedBy:
+          type: string
+        passportIssueDate:
+          type: string
+          format: date
+        registrationAddress:
+          type: string
+        role:
+          type: string
+          enum: [user, admin, inspector]
+        createdAt:
+          type: string
+          format: date-time
+    Application:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        serviceType:
+          type: string
+          enum: [passport, snils, benefits, registration, certificate]
+        status:
+          type: string
+          enum: [draft, submitted, processing, completed, rejected]
+        personalData:
+          type: object
+          properties:
+            fullName:
+              type: string
+            birthDate:
+              type: string
+              format: date
+            snils:
+              type: string
+            passportData:
+              type: object
+            address:
+              type: string
+            income:
+              type: number
+              minimum: 0
+        documents:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+                enum: [passport_scan, income_certificate, medical_certificate]
+              url:
+                type: string
+                format: uri
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    AuditLog:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        action:
+          type: string
+        resourceType:
+          type: string
+        resourceId:
+          type: string
+        oldValues:
+          type: object
+        newValues:
+          type: object
+        ipAddress:
+          type: string
+        userAgent:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+
+security:
+  - BearerAuth: []
+
+paths:
+  # ==================== ПУБЛИЧНЫЕ МАРШРУТЫ ====================
+  /health:
+    get:
+      summary: Health check
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  version:
+                    type: string
+                  timestamp:
+                    type: string
+      x-yc-apigateway-integration:
+        type: dummy
+        http_code: 200
+        content:
+          application/json: |
+            {
+              "status": "ok",
+              "version": "1.0.0",
+              "timestamp": "2025-04-19T00:00:00Z"
+            }
+
+  /auth/register:
+    post:
+      ... (остальное без изменений)
+
+  /auth/register:
+    post:
+      summary: Регистрация нового пользователя
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - email
+                - password
+                - fullName
+                - snils
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  minLength: 6
+                fullName:
+                  type: string
+                snils:
+                  type: string
+                passportSeries:
+                  type: string
+                passportNumber:
+                  type: string
+      responses:
+        '201':
+          description: User created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  userId:
+                    type: string
+                  message:
+                    type: string
+        '400':
+          description: 'Validation error (WAF test: SQL injection, XSS)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-yc-apigateway-integration:
+        type: cloud_functions
+        function_id: ${function_authorizer}
+        tag: $latest
+
+  /auth/login:
+    post:
+      summary: Аутентификация (уязвимо к SQL-инъекции в поле email)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - email
+                - password
+              properties:
+                email:
+                  type: string
+                  example: "admin@example.com' OR '1'='1"
+                password:
+                  type: string
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                  refreshToken:
+                    type: string
+                  expiresIn:
+                    type: integer
+        '401':
+          description: Invalid credentials
+      x-yc-apigateway-integration:
+        type: cloud_functions
+        function_id: ${function_authorizer}
+        tag: $latest
+
+  # ==================== ЗАЩИЩЁННЫЕ МАРШРУТЫ ====================
+  /api/users/me:
+    get:
+      summary: Получить профиль текущего пользователя (содержит ПДн)
+      responses:
+        '200':
+          description: User profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '403':
+          description: Access denied
+      x-yc-apigateway-integration:
+        type: cloud_functions
+        function_id: ${function_application_crud}
+        tag: $latest
+    put:
+      summary: Обновить профиль (уязвимо к Mass Assignment)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                fullName:
+                  type: string
+                registrationAddress:
+                  type: string
+                role:
+                  type: string
+                  description: "Уязвимость: можно попытаться повысить роль до admin"
+      responses:
+        '200':
+          description: Profile updated
+      x-yc-apigateway-integration:
+        type: cloud_functions
+        function_id: ${function_application_crud}
+        tag: $latest
+
+  /api/applications:
+    get:
+      summary: Получить список заявлений (IDOR уязвимость)
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: snils
+          in: query
+          schema:
+            type: string
+          description: "Уязвимо к NoSQL-инъекции. Пример: {'$ne': null}"
+      responses:
+        '200':
+          description: List of applications
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Application'
+                  total:
+                    type: integer
+        '500':
+          description: Internal error with stack trace
+      x-yc-apigateway-integration:
+        type: cloud_functions
+        function_id: ${function_application_crud}
+        tag: $latest
+    post:
+      summary: Создать новое заявление (передаёт все ПДн)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - serviceType
+                - personalData
+              properties:
+                serviceType:
+                  type: string
+                personalData:
+                  type: object
+                documents:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      url:
+                        type: string
+      responses:
+        '201':
+          description: Application created
+          headers:
+            Location:
+              schema:
+                type: string
+              description: URL созданного заявления
+      x-yc-apigateway-integration:
+        type: cloud_functions
+        function_id: ${function_application_crud}
+        tag: $latest
+
+  /api/applications/{applicationId}:
+    parameters:
+      - name: applicationId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+        description: UUID заявления
+    get:
+      summary: Получить конкретное заявление (IDOR - можно подменить ID)
+      responses:
+        '200':
+          description: Application details with all personal data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Application'
+        '404':
+          description: Application not found
+      x-yc-apigateway-integration:
+        type: cloud_functions
+        function_id: ${function_application_crud}
+        tag: $latest
+    put:
+      summary: Обновить заявление (можно менять статус без проверки прав)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status:
+                  type: string
+                personalData:
+                  type: object
+      responses:
+        '200':
+          description: Application updated
+      x-yc-apigateway-integration:
+        type: cloud_functions
+        function_id: ${function_application_crud}
+        tag: $latest
+    delete:
+      summary: Удалить заявление (нет проверки владельца)
+      responses:
+        '204':
+          description: Application deleted
+      x-yc-apigateway-integration:
+        type: cloud_functions
+        function_id: ${function_application_crud}
+        tag: $latest
+
+  /api/applications/search:
+    post:
+      summary: Продвинутый поиск заявлений (NoSQL-инъекция)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                filters:
+                  type: object
+                  description: "Пример инъекции: {'snils': {'$regex': '.*'}}"
+                sort:
+                  type: object
+                limit:
+                  type: integer
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Application'
+      x-yc-apigateway-integration:
+        type: cloud_functions
+        function_id: ${function_application_crud}
+        tag: $latest
+
+  # ==================== ЗАГРУЗКА ДОКУМЕНТОВ ====================
+  /api/documents/upload:
+    post:
+      summary: Загрузить скан документа (Path Traversal уязвимость)
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                documentType:
+                  type: string
+                filename:
+                  type: string
+                  description: "Уязвимо к path traversal: ../../../etc/passwd"
+      responses:
+        '201':
+          description: File uploaded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  fileUrl:
+                    type: string
+                  fileId:
+                    type: string
+      x-yc-apigateway-integration:
+        type: cloud_functions
+        function_id: ${function_import_function}
+        tag: $latest
+
+  /api/documents/{fileId}:
+    get:
+      summary: Скачать документ (проверка доступа отсутствует)
+      parameters:
+        - name: fileId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: File content
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+      x-yc-apigateway-integration:
+        type: cloud_functions
+        function_id: ${function_import_function}
+        tag: $latest
+
+  # ==================== АДМИНИСТРАТИВНЫЕ МАРШРУТЫ ====================
+  /admin/users:
+    get:
+      summary: Список всех пользователей (только для admin)
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - name: export
+          in: query
+          schema:
+            type: boolean
+          description: "Экспорт всех ПДн в CSV"
+      responses:
+        '200':
+          description: List of users with personal data
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/User'
+      x-yc-apigateway-integration:
+        type: cloud_functions
+        function_id: ${function_application_crud}
+        tag: $latest
+
+  /admin/audit:
+    get:
+      summary: Логи аудита (могут содержать ПДн в oldValues/newValues)
+      parameters:
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: userId
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Audit logs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AuditLog'
+      x-yc-apigateway-integration:
+        type: cloud_functions
+        function_id: ${function_application_crud}
+        tag: $latest
+
+  # ==================== ВНЕШНИЕ СЕРВИСЫ ====================
+  /api/import/egov:
+    post:
+      summary: Импорт данных из внешнего госсервиса (SSRF уязвимость)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                externalApiUrl:
+                  type: string
+                  description: "Уязвимо к SSRF: http://169.254.169.254/latest/meta-data/"
+                snils:
+                  type: string
+      responses:
+        '200':
+          description: Imported data
+          content:
+            application/json:
+              schema:
+                type: object
+      x-yc-apigateway-integration:
+        type: cloud_functions
+        function_id: ${function_import_from_egov}
+        tag: $latest
+
+  # ==================== WEBHOOKS И СТРИМИНГ ====================
+  /api/streams/votes:
+    post:
+      summary: Отправить голос (интеграция с Data Streams)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                applicationId:
+                  type: string
+                vote:
+                  type: string
+                  enum: [like, dislike]
+                userAgent:
+                  type: string
+                  description: "Уязвимо к инъекции в поток данных"
+      responses:
+        '202':
+          description: Vote accepted
+      x-yc-apigateway-integration:
+        type: cloud_functions
+        function_id: ${function_vote_function}
+        tag: $latest
+
+# ==================== ГЛОБАЛЬНЫЕ НАСТРОЙКИ API GATEWAY ====================
+x-yc-apigateway:
+  cors:
+    origin: '*'
+    methods: [GET, POST, PUT, DELETE, OPTIONS]
+    allowHeaders: ['Content-Type', 'Authorization', 'X-API-Key']
+    maxAge: 3600
+    credentials: true
+  x-yc-apigateway-security:
+    - name: rate-limit
+      enabled: true
+      requestsPerSecond: 100
+    - name: waf-rules
+      enabled: true
+      mode: detection
+      rules:
+        - sql-injection:
+            action: block
+            sensitivity: high
+        - xss:
+            action: block
+            sensitivity: medium
+        - path-traversal:
+            action: block
+        - ssrf:
+            action: block
+            urls:
+              - "169.254.169.254"
+              - "metadata.google.internal"
+              - "127.0.0.1"
+        - command-injection:
+            action: block
+        - mass-assignment:
+            action: log
+            fields:
+              - "role"
+              - "isAdmin"
+              - "permissions"
